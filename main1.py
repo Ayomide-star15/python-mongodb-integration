@@ -11,7 +11,7 @@ load_dotenv(find_dotenv())
 password = os.environ.get("MONGODB_PWD")
 
 # Mongo connection string (replace with your own if needed)
-connection_string = f"mongodb+srv://AyoTech:43l1OC1mqilP030g@dataforge.blxqv5n.mongodb.net/?retryWrites=true&w=majority&appName=DataForge"
+connection_string = f"mongodb+srv://AyoTech:@dataforge.blxqv5n.mongodb.net/?retryWrites=true&w=majority&appName=DataForge"
 
 # create a MongoClient instance (connects python to MongoDB)
 client = MongoClient(connection_string)
@@ -166,3 +166,4 @@ def add_address_relationship(person_id, address):
         address_collection.insert_one(address)
 
 add_address_relationship("68ac2fa4751eb10e30598e36",address)
+
