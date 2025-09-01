@@ -11,7 +11,7 @@ import time
 app = FastAPI()
 
 # ---------------- DB Setup ----------------
-client = MongoClient("mongodb+srv://AyoTech:aGj8hu250IP2Vj82@dataforge.blxqv5n.mongodb.net/?retryWrites=true&w=majority&appName=DataForge")
+client = MongoClient("mongodb+srv://AyoTech:@dataforge.blxqv5n.mongodb.net/?retryWrites=true&w=majority&appName=DataForge")
 db = client["School_app"]
 students_collection = db["students"]
 teachers_collection = db["teachers"]
@@ -205,3 +205,4 @@ def get_students_by_teacher(teacher_id: str):
         },
         "assigned_students": students
     }
+
