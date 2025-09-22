@@ -1,23 +1,31 @@
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 from pymongo import MongoClient
-from typing import List, Optional
-from bson import ObjectId
 from passlib.context import CryptContext
 from jose import JWTError, jwt
+import random
+import string
 import time
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import os
+from dotenv import load_dotenv
+from datetime import datetime, timedelta
+load_dotenv()
 
 app = FastAPI()
 
 # ---------------- DB Setup ----------------
-client = MongoClient("mongodb+srv://AyoTech:@dataforge.blxqv5n.mongodb.net/?retryWrites=true&w=majority&appName=DataForge")
+MongoDB_URI = os.getenv("MongoDB_URI")
+client = MongoClient(MongoDB_URI)  
 db = client["School_app"]
 students_collection = db["students"]
 teachers_collection = db["teachers"]
 
 # ---------------- JWT Config ----------------
-SECRET_KEY = "super-secret-key-please-change-to-a-very-long-string"  
+SECRET_KEY = os.environ.get("JWT_SECRET", "super-secret-key")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
@@ -28,34 +36,36 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 # ---------------- Models ----------------
-class StudentRegister(BaseModel):
-    username: str
-    full_name: Optional[str] = None
-    email: str
-    password: str
+class StudentCreate(BaseModel):
+    full_name: str
+    email: EmailStr
+    gender: str
+    student_class: str
+    age: int
+    address: str
 
-class Teacher(BaseModel):
-    name: str
-    email: str
+class TeacherCreate(BaseModel):
+    full_name: str
+    email: EmailStr
+    gender: str
     subject: str
-
-class BulkAssign(BaseModel):
-    student_usernames: List[str]
-    teacher_email: str
+    years_of_experience: int
+    address: str
 
 class Token(BaseModel):
     access_token: str
     token_type: str
 
-class TokenData(BaseModel):
-    username: Optional[str] = None
-
-# ---------------- Utils ----------------
+# ---------------- Utility Functions ----------------
 def hash_password(password: str):
     return pwd_context.hash(password)
 
 def verify_password(plain_password: str, hashed_password: str):
     return pwd_context.verify(plain_password, hashed_password)
+
+def generate_password(length: int = 10):
+    chars = string.ascii_letters + string.digits + string.punctuation
+    return ''.join(random.choice(chars) for _ in range(length))
 
 def create_access_token(data: dict, expires_delta: int = ACCESS_TOKEN_EXPIRE_MINUTES):
     to_encode = data.copy()
@@ -63,8 +73,7 @@ def create_access_token(data: dict, expires_delta: int = ACCESS_TOKEN_EXPIRE_MIN
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-async def get_current_student(token: str = Depends(oauth2_scheme)):
-    """Dependency to fetch current student from token"""
+async def get_current_user(token: str = Depends(oauth2_scheme)):
     credentials_exception = HTTPException(
         status_code=401,
         detail="Could not validate credentials",
@@ -72,138 +81,166 @@ async def get_current_student(token: str = Depends(oauth2_scheme)):
     )
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
+        username: str = payload.get("sub") or ""
+        role: str = payload.get("role") or ""
+        if username is None or role is None:
             raise credentials_exception
     except JWTError:
         raise credentials_exception
-    
-    student = students_collection.find_one({"username": username})
-    if not student:
+
+    collection = students_collection if role == "student" else teachers_collection
+    user = collection.find_one({"username": username})
+    if not user:
         raise credentials_exception
-    return student
+    return user
 
-# ---------------- Student Routes ----------------
-@app.post("/register")
-def register_student(student: StudentRegister):
-    if students_collection.find_one({"username": student.username}):
-        raise HTTPException(status_code=400, detail="Username already exists")
+# ---------------- Email Function ----------------
+def send_credentials_email(to_email: str, full_name: str, username: str, password: str, role: str):
+    SMTP_SERVER = "smtp.gmail.com"
+    SMTP_PORT = 465
+    
+    sender_email = os.environ.get("SENDER_EMAIL")
+    sender_app_password = os.environ.get("SENDER_PASSWORD")
+    
+    message = MIMEMultipart("alternative")
+    message["Subject"] = f"Your {role.capitalize()} Account Credentials"
+    message["From"] = str(sender_email)
+    message["To"] = to_email
 
-    student_data = student.dict()
-    student_data["hashed_password"] = hash_password(student.password)
-    del student_data["password"]
+
+    text = f"""
+Hello {full_name},
+
+Your {role} account has been created.
+
+Username: {username}
+Password: {password}
+
+Please keep this information safe.
+"""
+    message.attach(MIMEText(text, "plain"))
+
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(str(sender_email), str(sender_app_password))
+            server.sendmail(str(sender_email), to_email, message.as_string())
+    except Exception as e:
+        print(f"Error sending email: {e}")
+        raise HTTPException(status_code=500, detail="Failed to send email credentials")
+
+# ---------------- Admin Add Student ----------------
+@app.post("/admin/add_student")
+def add_student(student: StudentCreate):
+    if students_collection.find_one({"username": student.email}):
+        raise HTTPException(status_code=400, detail="Student with this email already exists")
+
+    raw_password = generate_password()
+    hashed_password = hash_password(raw_password)
+
+    student_data = {
+        "full_name": student.full_name,
+        "username": student.email,
+        "email": student.email,
+        "gender": student.gender,
+        "student_class": student.student_class,
+        "age": student.age,
+        "address": student.address,
+        "hashed_password": hashed_password,
+        "role": "student"
+    }
 
     students_collection.insert_one(student_data)
-    return {"message": "Student registered successfully"}
 
+    # Send credentials emai
+    send_credentials_email(student.email, student.full_name, student.email, raw_password, "student")
+
+    return {
+        "message": f"Student {student.full_name} added successfully.",
+        "username": student.email,
+        "password": raw_password
+    }
+
+# ---------------- Admin Add Teacher ----------------
+@app.post("/admin/add_teacher")
+def add_teacher(teacher: TeacherCreate):
+    if teachers_collection.find_one({"username": teacher.email}):
+        raise HTTPException(status_code=400, detail="Teacher with this email already exists")
+
+    raw_password = generate_password()
+    hashed_password = hash_password(raw_password)
+
+    teacher_data = {
+        "full_name": teacher.full_name,
+        "username": teacher.email,
+        "email": teacher.email,
+        "gender": teacher.gender,
+        "subject": teacher.subject,
+        "years_of_experience": teacher.years_of_experience,
+        "address": teacher.address,
+        "hashed_password": hashed_password,
+        "role": "teacher"
+    }
+
+    teachers_collection.insert_one(teacher_data)
+
+    # Send credentials email
+    send_credentials_email(teacher.email, teacher.full_name, teacher.email, raw_password, "teacher")
+
+    return {
+        "message": f"Teacher {teacher.full_name} added successfully.",
+        "username": teacher.email,
+        "password": raw_password
+    }
+
+# ---------------- Login (Student or Teacher) ----------------
 @app.post("/login", response_model=Token)
-def login_student(form_data: OAuth2PasswordRequestForm = Depends()):
-    student = students_collection.find_one({"username": form_data.username})
-
-    if not student:
+def login_user(form_data: OAuth2PasswordRequestForm = Depends()):
+    # Check in students
+    user = students_collection.find_one({"username": form_data.username})
+    role = "student"
+    if not user:
+        # If not student, check teachers
+        user = teachers_collection.find_one({"username": form_data.username})
+        role = "teacher"
+    if not user or not verify_password(form_data.password, user["hashed_password"]):
         raise HTTPException(status_code=401, detail="Incorrect username or password")
 
-    # If old "password" exists, convert it to hashed
-    if "password" in student and "hashed_password" not in student:
-        hashed_pw = hash_password(student["password"])
-        students_collection.update_one(
-            {"_id": student["_id"]},
-            {"$set": {"hashed_password": hashed_pw}, "$unset": {"password": ""}}
-        )
-        student["hashed_password"] = hashed_pw
-
-    if "hashed_password" not in student:
-        raise HTTPException(status_code=401, detail="Incorrect username or password")
-
-    if not verify_password(form_data.password, student["hashed_password"]):
-        raise HTTPException(status_code=401, detail="Incorrect username or password")
-
-    access_token = create_access_token(data={"sub": student["username"]})
+    access_token = create_access_token(data={"sub": user["username"], "role": role})
     return {"access_token": access_token, "token_type": "bearer"}
 
+# ---------------- Protected Profile ----------------
 @app.get("/my_profile")
-def read_profile(current_student: dict = Depends(get_current_student)):
-    return {
-        "full_name": current_student.get("full_name"),
-        "email": current_student["email"],
-        "username": current_student["username"],
-        "message": "This is your protected profile information."
+def read_profile(current_user: dict = Depends(get_current_user)):
+    role = current_user.get("role", "student")
+    base_profile = {
+        "full_name": current_user.get("full_name"),
+        "email": current_user["email"],
+        "username": current_user["username"],
+        "gender": current_user.get("gender"),
+        "address": current_user.get("address"),
+        "role": role,
+        "message": f"This is your protected {role} profile information."
     }
+    if role == "student":
+        base_profile.update({
+            "class": current_user.get("student_class"),
+            "age": current_user.get("age"),
+        })
+    else:  # teacher
+        base_profile.update({
+            "subject": current_user.get("subject"),
+            "years_of_experience": current_user.get("years_of_experience"),
+        })
+    return base_profile
 
-@app.get("/students")
+
+# ---------------- New: Get Endpoint ----------------
+@app.get("/admin/get_students")
 def get_students():
-    students = list(students_collection.find({}, {"_id": 0, "hashed_password": 0}))
-    return students
+    students = list(students_collection.find({}, {"_id": 0, "password": 0}))
+    return {"students": students}
 
-# ---------------- Teacher Routes ----------------
-@app.post("/add_teacher")
-def add_teacher(teacher: Teacher):
-    if teachers_collection.find_one({"email": teacher.email}):
-        raise HTTPException(status_code=400, detail="Teacher with this email already exists")
-    teachers_collection.insert_one(teacher.dict())
-    return {"message": "Teacher added successfully"}
-
-@app.post("/assign_teacher_bulk")
-def assign_teacher_bulk(data: BulkAssign):
-    teacher = teachers_collection.find_one({"email": data.teacher_email})
-    if not teacher:
-        raise HTTPException(status_code=404, detail="Teacher not found")
-    
-    result = students_collection.update_many(
-        {"username": {"$in": data.student_usernames}},
-        {"$set": {"teacher_id": str(teacher["_id"])}}
-    )
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="No students found with provided usernames")
-
-    return {"message": f"Teacher {teacher['name']} assigned to {result.modified_count} students"}
-
-# ---------------- Combined Routes ----------------
-@app.get("/students_with_teachers")
-def students_with_teachers():
-    students = list(students_collection.find({}))
-    result = []
-    for s in students:
-        student_info = {
-            "full_name": s.get("full_name"),
-            "email": s.get("email"),
-            "username": s.get("username")
-        }
-        if s.get("teacher_id"):
-            teacher = teachers_collection.find_one({"_id": ObjectId(s["teacher_id"])})
-            if teacher:
-                student_info["teacher"] = {
-                    "name": teacher["name"],
-                    "email": teacher["email"],
-                    "subject": teacher["subject"]
-                }
-        result.append(student_info)
-    return result
-
-@app.get("/students_by_teacher/{teacher_id}")
-def get_students_by_teacher(teacher_id: str):
-    try:
-        teacher_obj_id = ObjectId(teacher_id)
-    except:
-        raise HTTPException(status_code=400, detail="Invalid teacher ID format")
-
-    teacher = teachers_collection.find_one({"_id": teacher_obj_id})
-    if not teacher:
-        raise HTTPException(status_code=404, detail="Teacher not found")
-
-    students = list(students_collection.find(
-        {"teacher_id": teacher_id},
-        {"_id": 0, "hashed_password": 0}
-    ))
-
-    return {
-        "teacher": {
-            "id": str(teacher["_id"]),
-            "name": teacher["name"],
-            "email": teacher["email"],
-            "subject": teacher["subject"]
-        },
-        "assigned_students": students
-    }
-
-
+@app.get("/admin/get_teachers")
+def get_teachers():
+    teachers = list(teachers_collection.find({}, {"_id": 0, "password": 0}))
+    return {"teachers": teachers}
