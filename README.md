@@ -1,2 +1,1 @@
-School Management Backend API
- Is a backend system for managing student and teacher profiles, authentication, using FastAPI and MongoDB.
+A backend system for managing student and teacher profiles with authentication, built using FastAPI and MongoDB.
